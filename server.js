@@ -15,9 +15,21 @@ app.use((req, res, next) => {
     next();
 });
 
-// Health check
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'OK', message: 'yt-dlp installed!' });
+// Health check - yt-dlp status bhi dikhayega
+app.get('/api/health', async (req, res) => {
+    try {
+        const { stdout } = await execPromise('yt-dlp --version');
+        res.json({ 
+            status: 'OK', 
+            yt_dlp_version: stdout.trim(),
+            message: 'API is ready!' 
+        });
+    } catch (error) {
+        res.json({ 
+            status: 'Error', 
+            message: error.message 
+        });
+    }
 });
 
 // Main download endpoint
@@ -29,13 +41,16 @@ app.get('/api/download', async (req, res) => {
     }
 
     try {
-        // Check if yt-dlp exists
-        const checkCommand = 'which yt-dlp';
-        await execPromise(checkCommand);
+        console.log("Processing URL:", url);
         
-        // Extract video info
+        // Direct yt-dlp command (ab install ho chuka hai)
         const command = `yt-dlp -j "${url}"`;
-        const { stdout } = await execPromise(command, { timeout: 60000 });
+        const { stdout, stderr } = await execPromise(command, { timeout: 60000 });
+        
+        if (stderr && !stdout) {
+            throw new Error(stderr);
+        }
+
         const data = JSON.parse(stdout);
         
         // Video formats (mp4 only)
@@ -48,12 +63,21 @@ app.get('/api/download', async (req, res) => {
                 url: f.url
             }));
         
-        // Best quality
+        // Best quality video
         const bestQuality = videoFormats.sort((a, b) => {
             const aQ = parseInt(a.quality) || 0;
             const bQ = parseInt(b.quality) || 0;
             return bQ - aQ;
         })[0];
+        
+        // Audio format
+        const audioFormat = data.formats
+            .filter(f => f.acodec !== 'none' && f.vcodec === 'none')
+            .map(f => ({
+                quality: f.abr ? `${f.abr}kbps` : 'Audio',
+                ext: 'mp3',
+                url: f.url
+            }))[0];
         
         res.json({
             success: true,
@@ -62,11 +86,13 @@ app.get('/api/download', async (req, res) => {
             duration: data.duration,
             uploader: data.uploader,
             videoFormats: videoFormats.slice(0, 5),
-            videoUrl: bestQuality?.url
+            audioFormats: audioFormat ? [{ quality: audioFormat.quality, ext: 'mp3', url: audioFormat.url }] : [],
+            videoUrl: bestQuality?.url,
+            audioUrl: audioFormat?.url
         });
         
     } catch (error) {
-        console.error('Error:', error.message);
+        console.error("Error:", error.message);
         res.status(500).json({ 
             error: 'Extraction failed',
             details: error.message 

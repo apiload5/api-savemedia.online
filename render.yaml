@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: api-savemedia-online
+    runtime: image
+    repo: https://github.com/apiload5/api-savemedia.online
+    plan: free
+    dockerfilePath: ./Dockerfile

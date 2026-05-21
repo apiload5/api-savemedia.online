@@ -2,6 +2,7 @@ const express = require('express');
 const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,21 +16,40 @@ app.use((req, res, next) => {
     next();
 });
 
-// Health check - yt-dlp status bhi dikhayega
-app.get('/api/health', async (req, res) => {
-    try {
-        const { stdout } = await execPromise('yt-dlp --version');
-        res.json({ 
-            status: 'OK', 
-            yt_dlp_version: stdout.trim(),
-            message: 'API is ready!' 
-        });
-    } catch (error) {
-        res.json({ 
-            status: 'Error', 
-            message: error.message 
-        });
+// yt-dlp ka exact path dhundho
+function getYtDlpPath() {
+    // Possible paths where yt-dlp could be installed
+    const possiblePaths = [
+        '/usr/local/bin/yt-dlp',
+        '/usr/bin/yt-dlp',
+        '/opt/render/project/.local/bin/yt-dlp',
+        '/home/render/.local/bin/yt-dlp',
+        '/app/.local/bin/yt-dlp',
+        'yt-dlp'  // fallback
+    ];
+    
+    for (const path of possiblePaths) {
+        if (fs.existsSync(path)) {
+            console.log('Found yt-dlp at:', path);
+            return path;
+        }
     }
+    
+    // Agar nahi mila toh 'which' command try karo
+    return 'yt-dlp';
+}
+
+// Health check - yt-dlp status
+app.get('/api/health', async (req, res) => {
+    const ytPath = getYtDlpPath();
+    const pathExists = fs.existsSync(ytPath) || ytPath === 'yt-dlp';
+    
+    res.json({ 
+        status: 'OK',
+        yt_dlp_path: ytPath,
+        path_exists: pathExists,
+        message: 'API is running'
+    });
 });
 
 // Main download endpoint
@@ -41,10 +61,13 @@ app.get('/api/download', async (req, res) => {
     }
 
     try {
-        console.log("Processing URL:", url);
+        const ytPath = getYtDlpPath();
+        console.log('Using yt-dlp path:', ytPath);
         
-        // Direct yt-dlp command (ab install ho chuka hai)
-        const command = `yt-dlp -j "${url}"`;
+        // Command with full path
+        const command = `${ytPath} -j "${url}"`;
+        console.log('Running command:', command);
+        
         const { stdout, stderr } = await execPromise(command, { timeout: 60000 });
         
         if (stderr && !stdout) {
@@ -92,7 +115,7 @@ app.get('/api/download', async (req, res) => {
         });
         
     } catch (error) {
-        console.error("Error:", error.message);
+        console.error('Error:', error.message);
         res.status(500).json({ 
             error: 'Extraction failed',
             details: error.message 
@@ -102,4 +125,5 @@ app.get('/api/download', async (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`✅ API running on port ${PORT}`);
+    console.log(`yt-dlp path check: ${getYtDlpPath()}`);
 });

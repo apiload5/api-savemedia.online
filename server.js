@@ -2,53 +2,49 @@ const express = require('express');
 const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
+const path = require('path');
 const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS for Blogger
+// CORS
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST');
-    res.header('Access-Control-Allow-Headers', 'Content-Type');
     res.header('Content-Type', 'application/json');
     next();
 });
 
-// yt-dlp ka exact path dhundho
+// yt-dlp ka exact path - Render pe local bin folder mein hai
 function getYtDlpPath() {
-    // Possible paths where yt-dlp could be installed
     const possiblePaths = [
-        '/usr/local/bin/yt-dlp',
-        '/usr/bin/yt-dlp',
+        path.join(__dirname, 'bin', 'yt-dlp'),
+        '/opt/render/project/src/bin/yt-dlp',
         '/opt/render/project/.local/bin/yt-dlp',
-        '/home/render/.local/bin/yt-dlp',
-        '/app/.local/bin/yt-dlp',
-        'yt-dlp'  // fallback
+        '/home/render/.local/bin/yt-dlp'
     ];
     
-    for (const path of possiblePaths) {
-        if (fs.existsSync(path)) {
-            console.log('Found yt-dlp at:', path);
-            return path;
+    for (const p of possiblePaths) {
+        if (fs.existsSync(p)) {
+            console.log('Found yt-dlp at:', p);
+            return p;
         }
     }
     
-    // Agar nahi mila toh 'which' command try karo
+    console.log('yt-dlp not found in paths, using default');
     return 'yt-dlp';
 }
 
-// Health check - yt-dlp status
+// Health check
 app.get('/api/health', async (req, res) => {
     const ytPath = getYtDlpPath();
-    const pathExists = fs.existsSync(ytPath) || ytPath === 'yt-dlp';
+    const exists = fs.existsSync(ytPath);
     
     res.json({ 
-        status: 'OK',
+        status: 'OK', 
         yt_dlp_path: ytPath,
-        path_exists: pathExists,
-        message: 'API is running'
+        file_exists: exists,
+        message: exists ? 'yt-dlp ready' : 'yt-dlp not found'
     });
 });
 
@@ -57,16 +53,19 @@ app.get('/api/download', async (req, res) => {
     const url = req.query.url;
     
     if (!url) {
-        return res.status(400).json({ error: 'URL nahi diya' });
+        return res.status(400).json({ error: 'No URL provided' });
     }
 
     try {
         const ytPath = getYtDlpPath();
-        console.log('Using yt-dlp path:', ytPath);
         
-        // Command with full path
+        // Check if file exists
+        if (!fs.existsSync(ytPath) && ytPath !== 'yt-dlp') {
+            throw new Error(`yt-dlp not found at ${ytPath}`);
+        }
+        
         const command = `${ytPath} -j "${url}"`;
-        console.log('Running command:', command);
+        console.log('Running:', command);
         
         const { stdout, stderr } = await execPromise(command, { timeout: 60000 });
         
@@ -76,54 +75,34 @@ app.get('/api/download', async (req, res) => {
 
         const data = JSON.parse(stdout);
         
-        // Video formats (mp4 only)
         const videoFormats = data.formats
             .filter(f => f.ext === 'mp4' && f.vcodec !== 'none')
             .map(f => ({
                 quality: f.height ? `${f.height}p` : 'Video',
                 ext: 'mp4',
-                filesize: f.filesize ? `${(f.filesize / 1024 / 1024).toFixed(1)} MB` : 'Unknown',
                 url: f.url
             }));
         
-        // Best quality video
         const bestQuality = videoFormats.sort((a, b) => {
             const aQ = parseInt(a.quality) || 0;
             const bQ = parseInt(b.quality) || 0;
             return bQ - aQ;
         })[0];
         
-        // Audio format
-        const audioFormat = data.formats
-            .filter(f => f.acodec !== 'none' && f.vcodec === 'none')
-            .map(f => ({
-                quality: f.abr ? `${f.abr}kbps` : 'Audio',
-                ext: 'mp3',
-                url: f.url
-            }))[0];
-        
         res.json({
             success: true,
             title: data.title,
             thumbnail: data.thumbnail,
-            duration: data.duration,
-            uploader: data.uploader,
-            videoFormats: videoFormats.slice(0, 5),
-            audioFormats: audioFormat ? [{ quality: audioFormat.quality, ext: 'mp3', url: audioFormat.url }] : [],
-            videoUrl: bestQuality?.url,
-            audioUrl: audioFormat?.url
+            videoUrl: bestQuality?.url
         });
         
     } catch (error) {
         console.error('Error:', error.message);
-        res.status(500).json({ 
-            error: 'Extraction failed',
-            details: error.message 
-        });
+        res.status(500).json({ error: error.message });
     }
 });
 
 app.listen(PORT, () => {
     console.log(`✅ API running on port ${PORT}`);
-    console.log(`yt-dlp path check: ${getYtDlpPath()}`);
+    console.log(`yt-dlp path: ${getYtDlpPath()}`);
 });

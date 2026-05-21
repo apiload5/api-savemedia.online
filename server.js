@@ -1,138 +1,78 @@
-const express = require('express');
-const { exec } = require('child_process');
-const util = require('util');
-const execPromise = util.promisify(exec);
-const path = require('path');
-const fs = require('fs');
+import os
+import json
+import subprocess
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+app = Flask(__name__)
+CORS(app)
 
-app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Content-Type', 'application/json');
-    next();
-});
+@app.route('/api/health', methods=['GET'])
+def health():
+    try:
+        result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True, timeout=10)
+        return jsonify({
+            'status': 'OK',
+            'yt_dlp_version': result.stdout.strip(),
+            'message': 'Python API is running!'
+        })
+    except Exception as e:
+        return jsonify({'status': 'ERROR', 'message': str(e)})
 
-function getYtDlpPath() {
-    const possiblePaths = [
-        path.join(__dirname, 'bin', 'yt-dlp'),
-        '/opt/render/project/src/bin/yt-dlp'
-    ];
+@app.route('/api/download', methods=['GET'])
+def download():
+    url = request.args.get('url')
     
-    for (const p of possiblePaths) {
-        if (fs.existsSync(p)) {
-            return p;
-        }
-    }
-    return 'yt-dlp';
-}
-
-// Health check
-app.get('/api/health', async (req, res) => {
-    const ytPath = getYtDlpPath();
-    const exists = fs.existsSync(ytPath);
-    let version = null;
-    let testOutput = null;
+    if not url:
+        return jsonify({'error': 'No URL provided'}), 400
     
-    if (exists) {
-        try {
-            const { stdout } = await execPromise(`${ytPath} --version`);
-            version = stdout.trim();
-        } catch(e) { version = e.message; }
+    try:
+        # Get video info as JSON
+        cmd = ['yt-dlp', '-j', url]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         
-        // Test with a simple URL
-        try {
-            const { stdout } = await execPromise(`${ytPath} -j "https://www.youtube.com/watch?v=dQw4w9WgXcQ"`, { timeout: 30000 });
-            testOutput = stdout ? stdout.substring(0, 200) : 'EMPTY';
-        } catch(e) { testOutput = e.message; }
-    }
-    
-    res.json({ 
-        status: 'OK',
-        yt_dlp_path: ytPath,
-        file_exists: exists,
-        version: version,
-        test_output: testOutput
-    });
-});
+        if result.returncode != 0:
+            return jsonify({
+                'error': 'yt-dlp failed',
+                'details': result.stderr
+            }), 500
+        
+        if not result.stdout:
+            return jsonify({'error': 'No output from yt-dlp'}), 500
+        
+        data = json.loads(result.stdout)
+        
+        # Get best video URL
+        video_url = None
+        for f in data.get('formats', []):
+            if f.get('ext') == 'mp4' and f.get('vcodec') != 'none':
+                if not video_url:
+                    video_url = f.get('url')
+                # Prefer higher quality
+                if f.get('height') and video_url:
+                    current_height = 0
+                    for existing in data.get('formats', []):
+                        if existing.get('url') == video_url:
+                            current_height = existing.get('height', 0)
+                            break
+                    if f.get('height', 0) > current_height:
+                        video_url = f.get('url')
+        
+        return jsonify({
+            'success': True,
+            'title': data.get('title', 'Video'),
+            'thumbnail': data.get('thumbnail'),
+            'duration': data.get('duration'),
+            'videoUrl': video_url or data.get('url')
+        })
+        
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Request timeout'}), 500
+    except json.JSONDecodeError as e:
+        return jsonify({'error': 'Invalid JSON from yt-dlp', 'details': str(e)}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
-// Main endpoint
-app.get('/api/download', async (req, res) => {
-    const url = req.query.url;
-    
-    if (!url) {
-        return res.status(400).json({ error: 'No URL provided' });
-    }
-
-    try {
-        const ytPath = getYtDlpPath();
-        
-        // First, try to get just the direct URL without JSON parsing
-        const urlCommand = `${ytPath} -g -f best "${url}"`;
-        console.log('Getting direct URL:', urlCommand);
-        
-        let videoUrl = null;
-        try {
-            const { stdout } = await execPromise(urlCommand, { timeout: 60000 });
-            videoUrl = stdout.trim();
-            console.log('Direct URL found:', videoUrl.substring(0, 100));
-        } catch(e) {
-            console.log('Direct URL failed:', e.message);
-        }
-        
-        // If direct URL works, return it
-        if (videoUrl && videoUrl.startsWith('http')) {
-            return res.json({
-                success: true,
-                title: 'Video',
-                videoUrl: videoUrl
-            });
-        }
-        
-        // Otherwise try JSON method
-        const jsonCommand = `${ytPath} -j "${url}"`;
-        console.log('Getting JSON:', jsonCommand);
-        
-        const { stdout, stderr } = await execPromise(jsonCommand, { timeout: 60000 });
-        
-        if (!stdout || stdout.trim() === '') {
-            throw new Error(`yt-dlp returned empty. Stderr: ${stderr || 'none'}`);
-        }
-        
-        const data = JSON.parse(stdout);
-        
-        const videoFormats = (data.formats || [])
-            .filter(f => f.ext === 'mp4' && f.vcodec !== 'none')
-            .map(f => ({
-                quality: f.height ? `${f.height}p` : 'Video',
-                ext: 'mp4',
-                url: f.url
-            }));
-        
-        const bestQuality = videoFormats.sort((a, b) => {
-            const aQ = parseInt(a.quality) || 0;
-            const bQ = parseInt(b.quality) || 0;
-            return bQ - aQ;
-        })[0];
-        
-        res.json({
-            success: true,
-            title: data.title || 'Video',
-            thumbnail: data.thumbnail,
-            videoUrl: bestQuality?.url || videoUrl
-        });
-        
-    } catch (error) {
-        console.error('Error:', error.message);
-        res.status(500).json({ 
-            error: 'Extraction failed',
-            details: error.message
-        });
-    }
-});
-
-app.listen(PORT, () => {
-    console.log(`✅ API running on port ${PORT}`);
-    console.log(`yt-dlp path: ${getYtDlpPath()}`);
-});
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
